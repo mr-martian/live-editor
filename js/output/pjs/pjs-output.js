@@ -65,12 +65,12 @@ window.PJSOutput = Backbone.View.extend({
 
         this.render();
         this.bind();
- 
+
         this.build(this.$canvas[0]);
-        
-        // The reason why we're passing the whole "output" object instead of 
-        // just imagesDir and soundsDir is because setPaths() is called 
-        // asynchronously on the first run so we don't actually know the value 
+
+        // The reason why we're passing the whole "output" object instead of
+        // just imagesDir and soundsDir is because setPaths() is called
+        // asynchronously on the first run so we don't actually know the value
         // for those paths yet.
         this.resourceCache = new PJSResourceCache({
             canvas: this.canvas,
@@ -162,6 +162,10 @@ window.PJSOutput = Backbone.View.extend({
             // method on it which returns "rgba(0,0,0,0)" which doesn't doesn't
             // contain the string "return" so it fails.
             safeCalls.color = true;
+            
+            // It doesn't affect the main Processing instance.  It fails the 
+            // above test because it calls "new Processing();".
+            safeCalls.createGraphics = true;
 
             // The one exception to the rule above is the draw function
             // (which is defined on init but CAN be overridden).
@@ -178,6 +182,9 @@ window.PJSOutput = Backbone.View.extend({
         BabyHint.init({
             context: this.canvas
         });
+
+        this.loopProtector = new LoopProtector(
+            this.infiniteLoopCallback.bind(this), 2000, 500);
 
         return this;
     },
@@ -322,6 +329,7 @@ window.PJSOutput = Backbone.View.extend({
     },
 
     bindProcessing: function(obj, bindTo) {
+        /* jshint forin:false */
         for (var prop in obj) {
             var val = obj[prop];
 
@@ -464,7 +472,6 @@ window.PJSOutput = Backbone.View.extend({
                 // This returns 0 if not found, which will mean that all
                 // the assertion failures are shown on the first line.
                 var getLineNum = function(stacktrace) {
-                    var err = new Error();
                     TraceKit.remoteFetching = false;
                     TraceKit.collectWindowErrors = false;
                     var stacktrace = TraceKit.computeStackTrace.ofCaller();
@@ -545,7 +552,20 @@ window.PJSOutput = Backbone.View.extend({
         return propList.join(",");
     },
 
-    lint: function(userCode, callback) {
+    /**
+     * Lints user code.
+     * 
+     * @param userCode: code to lint
+     * @param skip: skips linting if true and resolves Deferred immediately
+     * @returns {$.Deferred} resolves an array of lint errors
+     */
+    lint: function(userCode, skip) {
+        var deferred = $.Deferred();
+        if (skip) {
+            deferred.resolve([]);
+            return deferred;
+        }
+        
         // Build a string of options to feed into JSHint
         // All properties are defined in the config
         var hintCode = "/*jshint " +
@@ -563,7 +583,11 @@ window.PJSOutput = Backbone.View.extend({
             "*/\n" + userCode;
 
         var done = function(hintData, hintErrors) {
-            this.lintDone(userCode, hintData, hintErrors, callback);
+            this.extractGlobals(hintData);
+            this.output.results.assertions = [];
+            var lintErrors = this.mergeErrors(hintErrors,
+                BabyHint.babyErrors(userCode, hintErrors));
+            deferred.resolve(lintErrors);
         }.bind(this);
 
         // Don't run JSHint if there is no code to run
@@ -572,35 +596,23 @@ window.PJSOutput = Backbone.View.extend({
         } else {
             this.hintWorker.exec(hintCode, done);
         }
+        
+        return deferred;
     },
 
-    lintDone: function(userCode, hintData, hintErrors, callback) {
-        var externalProps = this.props;
-
+    /**
+     * Extracts globals from the data return from the jshint and stores them
+     * in this.globals.  Used in runCode, hasOrHadDrawLoop, and injectCode.
+     * 
+     * @param hintData: an object containing JSHINT.data after jshint-worker.js
+     *      runs JSHINT(userCode).
+     */
+    extractGlobals: function(hintData) {
         this.globals = {};
-        this.output.results.assertions = [];
-
-        if (hintData && hintData.globals) {
-            for (var i = 0, l = hintData.globals.length; i < l; i++) {
-                var global = hintData.globals[i];
-
-                // Do this so that declared variables are gobbled up
-                // into the global context object
-                if (!externalProps[global] && !(global in this.canvas)) {
-                    this.canvas[global] = undefined;
-                }
-
-                this.globals[global] = true;
-            }
-        }
-
-        var errors = this.mergeErrors(hintErrors,
-            BabyHint.babyErrors(userCode, hintErrors));
-
+        
         // We only need to extract globals when the code has passed
         // the JSHint check
-        this.globals = {};
-
+        var externalProps = this.props;
         if (hintData && hintData.globals) {
             for (var i = 0, l = hintData.globals.length; i < l; i++) {
                 var global = hintData.globals[i];
@@ -610,12 +622,9 @@ window.PJSOutput = Backbone.View.extend({
                 if (!externalProps[global] && !(global in this.canvas)) {
                     this.canvas[global] = undefined;
                 }
-
                 this.globals[global] = true;
             }
         }
-
-        callback(errors);
     },
 
     test: function(userCode, tests, errors, callback) {
@@ -643,6 +652,7 @@ window.PJSOutput = Backbone.View.extend({
     mergeErrors: function(jshintErrors, babyErrors) {
         var errors = [];
         var brokenLines = [];
+        var prioritizedChars = {};
         var hintErrors = [];
 
         // Find which lines JSHINT broke on
@@ -650,9 +660,20 @@ window.PJSOutput = Backbone.View.extend({
             if (error && error.line && error.character &&
                     error.reason &&
                     !/unable to continue/i.test(error.reason)) {
-                brokenLines.push(error.line - 2);
+                var realErrorLine = error.line - 2;
+                brokenLines.push(realErrorLine);
+                // Errors that override BabyLint errors in the remainder of the
+                // line. Includes: unclosed string (W112)
+                if (error.code === "W112") {
+                    error.character = error.evidence.indexOf("\"");
+                    if (!prioritizedChars[realErrorLine] ||
+                            prioritizedChars[realErrorLine] >
+                            error.character - 1) {
+                        prioritizedChars[realErrorLine] = error.character - 1;
+                    }
+                }
                 hintErrors.push({
-                    row: error.line - 2,
+                    row: realErrorLine,
                     column: error.character - 1,
                     text: error.reason,
                     type: "error",
@@ -667,19 +688,59 @@ window.PJSOutput = Backbone.View.extend({
         // to allow that error
         _.each(babyErrors, function(error) {
             if (_.include(brokenLines, error.row) || error.breaksCode) {
-                errors.push({
-                    row: error.row,
-                    column: error.column,
-                    text: error.text,
-                    type: "error",
-                    source: error.source,
-                    priority: 1
-                });
+                // Only include if not overridden by a JSLint error.
+                if (!prioritizedChars[error.row] ||
+                        prioritizedChars[error.row] > error.column) {
+                    errors.push({
+                        row: error.row,
+                        column: error.column,
+                        text: error.text,
+                        type: "error",
+                        source: error.source,
+                        context: error.context,
+                        priority: 1
+                    });
+                }
             }
         }.bind(this));
 
-        // Add JSHINT errors at the end
-        return errors.concat(hintErrors);
+        // Check for JSLint and BabyLint errors on the same line and character.
+        // Merge error messages where appropriate.
+        _.each(hintErrors, function(jsError, i) {
+            _.each(errors, function(babyError, j) {
+                if (jsError.row === babyError.row &&
+                        jsError.column === babyError.column) {
+                    // Merge if JSLint error says a variable is undefined and
+                    // BabyLint has spelling suggestion.
+                    if (jsError.lint.code === "W117" &&
+                            babyError.source === "spellcheck") {
+                        errors.splice(j, 1);
+                        jsError.text = $._("\"%(word)s\" is not defined. Maybe you meant to type \"%(keyword)s\", " +
+                            "or you're using a variable you didn't define.",
+                            {word: jsError.lint.a, keyword: babyError.context.keyword});
+                    }
+                }
+            });
+        });
+
+        // Merge JSHint and BabyHint errors
+        var allErrors = errors.concat(hintErrors);
+
+       // De-duplicate errors. Replacer tells JSON.stringify to ignore column
+       // and lint keys so objects with different columns or lint will still be
+       // treated as duplicates.
+       var replacer = function(key, value) {
+           if (key === "column" || key === "lint") {
+               return;
+           }
+           return value;
+       };
+
+       // Stringify objects to compare and de-duplicate.
+       var dedupErrors = _.uniq(allErrors, false, function(obj) {
+           return JSON.stringify(obj, replacer);
+       });
+       return dedupErrors;
     },
 
     runCode: function(userCode, callback) {
@@ -706,7 +767,7 @@ window.PJSOutput = Backbone.View.extend({
             //  they can't serialize.
             var PImage = this.canvas.PImage;
             var isStubbableObject = function(value) {
-                return $.isPlainObject(value) && 
+                return $.isPlainObject(value) &&
                     !(value instanceof PImage);
             };
 
@@ -749,7 +810,7 @@ window.PJSOutput = Backbone.View.extend({
                 }
                 context[global] = contextVal;
             }.bind(this));
-    
+
             this.worker.exec(userCode, context, function(errors, userCode) {
                 if (errors && errors.length > 0) {
                     return callback(errors, userCode);
@@ -763,11 +824,7 @@ window.PJSOutput = Backbone.View.extend({
             }.bind(this));
         }.bind(this);
 
-        if (this.globals.getImage || this.globals.getSound) {
-            this.resourceCache.cacheResources(userCode, runCode);
-        } else {
-            runCode();
-        }
+        this.resourceCache.cacheResources(userCode).then(runCode);
     },
 
     /*
@@ -872,14 +929,14 @@ window.PJSOutput = Backbone.View.extend({
         this.grabObj = {};
 
         // Extract a list of instances that were created using applyInstance
-        this.instances = [];
+        PJSOutput.instances = [];
 
         // Replace all calls to 'new Something' with
         // this.newInstance(Something)()
         // Used for keeping track of unique instances
         if (!this.debugger) {
             userCode = userCode && userCode.replace(
-                /\bnew[\s\n]+([A-Z]{1,2}[a-z0-9_]+)([\s\n]*\()/g,
+                /\bnew[\s\n]+([A-Z]{1,2}[a-zA-Z0-9_]+)([\s\n]*\()/g,
                 "PJSOutput.applyInstance($1,'$1')$2");
         } else {
             // we'll use the debugger's newCallback delegate method to
@@ -936,21 +993,38 @@ window.PJSOutput = Backbone.View.extend({
 
             // Keep track of all the constructor functions that may
             // have to be reinitialized
-            for (var i = 0, l = this.instances.length; i < l; i++) {
-                constructors[this.instances[i].constructor.__name] = true;
+            for (var i = 0, l = PJSOutput.instances.length; i < l; i++) {
+                constructors[PJSOutput.instances[i].constructor.__name] = true;
             }
 
             // The instantiated instances have changed, which means that
             // we need to re-run everything.
             if (this.oldInstances &&
                     PJSOutput.stringifyArray(this.oldInstances) !==
-                    PJSOutput.stringifyArray(this.instances)) {
+                    PJSOutput.stringifyArray(PJSOutput.instances)) {
+                rerun = true;
+            }
+            
+            // TODO(kevinb) cache instances returned by createGraphics.
+            // Rerun if there are any uses of createGraphics.  The problem is
+            // not actually createGraphics, but rather calls that render stuff
+            // to the Processing instances returned by createGraphics.  In the 
+            // future we might be able to reuse these instances, but we'd need
+            // to track which call to createGraphics returned which instance.
+            // Using the arguments as an id is insufficient.  We'd have to use
+            // some combination of which line number createGraphics was called
+            // on whether it was the first call, second call, etc. that created
+            // it to deal with loops.  We'd also need to take into account edit
+            // operations that add/remove lines so that we could update the 
+            // line number in the id to avoid unnecessary reruns.  After all of
+            // that we'll still have to fall back to rerun in all other cases.
+            if (/createGraphics[\s\n]*\(/.test(userCode)) {
                 rerun = true;
             }
 
             // Reset the instances list
-            this.oldInstances = this.instances;
-            this.instances = null;
+            this.oldInstances = PJSOutput.instances;
+            PJSOutput.instances = [];
 
             // Look for new top-level function calls to inject
             for (var i = 0; i < fnCalls.length; i++) {
@@ -1094,6 +1168,7 @@ window.PJSOutput = Backbone.View.extend({
                     // need to clear the display
                     if (oldProp === "draw") {
                         this.clear();
+                        this.canvas.draw = this.DUMMY;
                     }
                 }
             }
@@ -1190,7 +1265,13 @@ window.PJSOutput = Backbone.View.extend({
         // Make sure the object actually exists before we try
         // to inject stuff into it
         if (!this.canvas[name]) {
-            this.canvas[name] = $.isArray(obj) ? [] : {};
+            if ($.isArray(obj)) {
+                this.canvas[name] = [];
+            } else if ($.isFunction(obj)) {
+                this.canvas[name] = function() {};
+            } else {
+                this.canvas[name] = {};
+            }
         }
 
         // A specific property to inspect of the object
@@ -1277,7 +1358,7 @@ window.PJSOutput = Backbone.View.extend({
     },
 
     initTests: function(validate) {
-        return this.exec(validate, this.tester.testContext)
+        return this.exec(validate, this.tester.testContext);
     },
 
     exec: function(code) {
@@ -1287,6 +1368,10 @@ window.PJSOutput = Backbone.View.extend({
 
         var contexts = Array.prototype.slice.call(arguments, 1);
         var originalCode = code;
+        
+        code = this.loopProtector.protect(code);
+        contexts[0].KAInfiniteLoopProtect = this.loopProtector.KAInfiniteLoopProtect;
+        contexts[0].KAInfiniteLoopSetTimeout = this.loopProtector.KAInfiniteLoopSetTimeout;
 
         // this is kind of sort of supposed to fake a gensym that the user
         // can't access but since we're limited to string manipulation, we
@@ -1323,8 +1408,29 @@ window.PJSOutput = Backbone.View.extend({
             }
 
         } catch (e) {
-            return e;
+            if (e.message === "KA_INFINITE_LOOP") {
+                return this.infiniteLoopError;
+            } else {
+                return e;
+            }
         }
+    },
+
+    infiniteLoopCallback:  function() {
+        this.output.postParent({
+            results: {
+                code: this.output.currentCode,
+                errors: [this.infiniteLoopError]
+            }
+        });
+        this.KA_INFINITE_LOOP = true;
+    },
+
+    infiniteLoopError: {
+        text: $._("Your javascript is taking too long to run. " +
+            "Perhaps you have a mistake in your code?"),
+        type: "error",
+        source: "timeout",
     },
 
     /*
@@ -1427,6 +1533,8 @@ window.PJSOutput = Backbone.View.extend({
 
 // Add in some static helper methods
 _.extend(PJSOutput, {
+    instances: [],
+    
     // Turn a JavaScript object into a form that can be executed
     // (Note: The form will not necessarily be able to pass a JSON linter)
     // (Note: JSON.stringify might throw an exception. We don't capture it
@@ -1486,7 +1594,6 @@ _.extend(PJSOutput, {
     // new Foo(a, b, c) into: applyInstance(Foo)(a, b, c)
     applyInstance: function(classFn, className) {
         // Don't wrap it if we're dealing with a built-in object (like RegExp)
-
         try {
             var funcName = (/^function\s*(\w+)/.exec(classFn) || [])[1];
             if (funcName && window[funcName] === classFn) {
@@ -1537,6 +1644,11 @@ _.extend(PJSOutput, {
         }.bind(this);
 
         // Keep track of the instances that have been instantiated
+        // Note: this.instances here is actually PJSOutput.instances which is
+        // a singleton.  This means that multiple instances of PJSOutput will
+        // shared the same instances array.  Since each PJSOutput lives in its 
+        // own iframe with its own execution context, each should have its own
+        // copy of PJSOutput.instances.
         if (this.instances) {
             this.instances.push(obj);
         }

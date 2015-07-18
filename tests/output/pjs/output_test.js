@@ -2,6 +2,13 @@
 /* global text, color, textFont, fill, text, background, createFont, PVector */
 /* global externals, exp, link, width, draw, mouseMoved, Program */
 
+describe("Version test", function() {
+    it("should use version 4 or greater", function() {
+        var config = new ScratchpadConfig({});
+        expect(config.latestVersion()).to.be(4);
+    });  
+});
+
 // Test the lower level functions in Output
 describe("Scratchpad CanvasOutput functions", function() {
     it("stringifyArray", function() {
@@ -460,6 +467,20 @@ describe("Scratchpad Output Exec", function() {
         };
 
     });
+    
+    runTest({
+        title: "Make sure methods on objects returned by createGraphics work",
+        code: function() {
+            var img = getImage("avatars/leafers-seedling");
+
+            var gfx = createGraphics(400, 400, 1);
+            gfx.image(img, 0, 0);
+
+            var draw = function() {
+                image(gfx, 10, 0);
+            };
+        }
+    });
 
     // This test requires commercial codecs
     if (supportsMpegAudio()) {
@@ -743,6 +764,23 @@ describe("Scratchpad Output Exec", function() {
     });
 
     runTest({
+        title: "should transform constructors with multiple capital letters",
+        code: function() {
+            var CommandQueue = function() {};
+            var commandQueue = new CommandQueue();
+        },
+        setup: function(output) {
+            sinon.spy(output.output, "exec");
+        },
+        teardown: function(output) {
+            var code = output.output.exec.getCall(0).args[0];
+            expect(code).to.contain("PJSOutput.applyInstance(CommandQueue,'CommandQueue')()");
+            expect(code).to.not.contain("new CommandQueue");
+            output.output.exec.restore();
+        }
+    });
+
+    runTest({
         // https://github.com/Khan/live-editor/issues/235
         title: "Modifying properties of globals doesn't clobber color properties",
         code: function() {
@@ -775,6 +813,26 @@ describe("Scratchpad Output Exec", function() {
             expect(p.ellipse.calledWith(200,200,200,200)).to.be(true);
             p.fill.restore();
             p.ellipse.restore();
+        },
+        wait: 100
+    });
+
+    runTest({
+        title: "Removing draw() sets it to the DUMMY function",
+        code: function() {
+            var foo = { c:color(255, 0, 0), r:100 };
+            var draw = function() {
+                background(255);
+                fill(foo.c);
+                ellipse(200, 200, foo.r, foo.r);
+            };
+        },
+        code2: function () {
+            var foo = { c:color(255, 0, 0), r:200 };
+        },
+        teardown: function(output) {
+            var p = output.output.canvas;
+            expect(p.draw).to.be(output.output.DUMMY);
         },
         wait: 100
     });

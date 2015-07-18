@@ -55,7 +55,7 @@ window.AceEditor = Backbone.View.extend({
             editor: this.editor,
             record: this.record
         });
-        
+
         this.tooltipEngine.on("scrubbingStarted", function(name) {
             this.trigger("scrubbingStarted", name);
         }.bind(this));
@@ -115,7 +115,10 @@ window.AceEditor = Backbone.View.extend({
 
         this.editor.on("change", function() {
             self.trigger("change");
-        });
+            if (this.editor.curOp && this.editor.curOp.command.name) {
+              self.trigger("userChangedCode");
+            }
+        }.bind(this));
 
         this.editor.on("click", function() {
             self.trigger("click");
@@ -388,7 +391,7 @@ window.AceEditor = Backbone.View.extend({
         var doc = this.editor.getSession().getDocument();
 
         return {
-            start: doc.positionToIndex(rng.start), 
+            start: doc.positionToIndex(rng.start),
             end: doc.positionToIndex(rng.end)
         };
     },
@@ -437,10 +440,6 @@ window.AceEditor = Backbone.View.extend({
                 this.setCursor({row: maxRow + 1, column: 0});
             }
         }
-    },
-
-    setReadOnly: function(state) {
-        this.editor.setReadOnly(state);
     },
 
     undo: function() {

@@ -1,3 +1,4 @@
+/*jshint unused: false*/
 /* Possibly options:
  *  code: First code to run
  *  code2: Code to run after
@@ -27,18 +28,6 @@ var runTest = function(options) {
 
     var displayTitle = options.title +
         " (Version: " + options.version + ")";
-
-    var getCodeFromOptions = function(code) {
-        // Assume the code is a string, by default
-        // If not then we assume that it's a function so we need to
-        // extract the code to run from the serialized function
-        if (code && typeof code !== "string") {
-            code = code.toString();
-            code = code.substr(code.indexOf("{") + 1);
-            code = code.substr(0, code.length - 1);
-        }
-        return code;
-    };
 
     var code1 = getCodeFromOptions(options.code);
     var code2 = getCodeFromOptions(options.code2);
@@ -104,39 +93,27 @@ var runTest = function(options) {
             }
         };
 
-        // Theoretically, jQuery.mouseup should work, but it wasn't working
-        //  for me across PhantomJS/browser, and this does.
-        var simulateClick = function() {
-            var ev = document.createEvent("MouseEvent");
-            ev.initMouseEvent(
-                "mouseup",
-                true, true,
-                window, null,
-                0, 0, 0, 0,
-                false, false, false, false,
-                0, null
-            );
-            output.output.$canvas[0].dispatchEvent(ev);
-        };
 
         // Run once to make sure that no errors are thrown
         // during execution
         output.runCode(code1, function(errors, testResults) {
             if (options.test) {
-                options.test(output, errors, testResults, done);
+                options.test(output, errors, testResults, function() {
+                    finishTest(done, output, options);
+                });
                 return;
             }
 
             checkErrors(options.errors, errors);
             checkAssertions(options.assertions, output.results.assertions);
-            options.simulateClick && simulateClick();
+            options.simulateClick && simulateClick(output);
 
             if (code2) {
                 output.runCode(code2, function(errors) {
                     checkErrors(options.errors2, errors);
                     checkAssertions(options.assertions2,
                         output.results.assertions);
-                    options.simulateClick && simulateClick();
+                    options.simulateClick && simulateClick(output);
 
                     finishTest(done, output, options);
                 });
@@ -180,7 +157,7 @@ var assertTest = function(options) {
             } else {
                 expect(errors).to.not.equal([]);
                 if (options.jshint) {
-                    expect(errors[0].lint).to.exist;
+                    expect(errors[0].lint).to.be.ok();
                     expect(errors[0].lint.reason)
                         .to.be.equal(options.reason);
                 } else {
@@ -192,6 +169,47 @@ var assertTest = function(options) {
         callback();
     };
     runTest(options);
+};
+
+/* Possible Options:
+ *  reason: List of expected lint output errors (sorted by priority)
+ *  fromTests: If true, compare reason to execution results
+ *  jshint: If true, code should be run through JSHint
+ *  title: Title of test
+ *  code: Code to be run through linter, output is compared to reason
+ */
+var allErrorsTest = function(options) {
+    options.test = function(output, errors, testResults, callback) {
+            if (options.reasons.length === 0) {
+                expect(errors.length).to.be.equal(0);
+            } else {
+                if (options.fromTests) {
+                    expect(testResults.length).to.equal(options.reasons.length);
+                    _.each(testResults, function(result, i) {
+                        expect(testResults).to.not.equal([]);
+                        expect(result.state).to.be.equal("fail");
+                        expect(result.results.meta.alsoMessage)
+                            .to.be.equal(options.reasons[i]);
+                    });
+                } else {
+                    expect(errors).to.not.equal([]);
+                    expect(errors.length).to.equal(options.reasons.length);
+                    if (options.jshint) {
+                        _.each(errors, function(error, i) {
+                            expect(error.lint).to.be.ok();
+                            expect(error.lint.reason).to.be.equal(options.reasons[i]);
+                        });
+                    } else {
+                        _.each(errors, function(error, i) {
+                            var $html = $("<div>" + error.text + "</div>");
+                            expect($html.text()).to.be.equal(options.reasons[i]);
+                        });
+                    }
+                }
+            }
+            callback();
+        };
+        runTest(options);
 };
 
 var test = function(title, code, code2) {
@@ -212,11 +230,34 @@ var failingTest = function(title, code, code2, errors) {
     });
 };
 
-var assertEqualTest = function(title, code, assertions) {
-    runTest({title: options.title, code: code, assertions: assertions});
-};
-
 var supportsMpegAudio = function() {
     var a = document.createElement('audio');
     return !!(a.canPlayType && a.canPlayType('audio/mpeg;').replace(/no/, ''));
+};
+
+var getCodeFromOptions = function(code) {
+    // Assume the code is a string, by default
+    // If not then we assume that it's a function so we need to
+    // extract the code to run from the serialized function
+    if (code && typeof code !== "string") {
+        code = code.toString();
+        code = code.substr(code.indexOf("{") + 1);
+        code = code.substr(0, code.length - 1);
+    }
+    return code;
+};
+
+// Theoretically, jQuery.mouseup should work, but it wasn't working
+//  for me across PhantomJS/browser, and this does.
+var simulateClick = function(output) {
+    var ev = document.createEvent("MouseEvent");
+    ev.initMouseEvent(
+        "mouseup",
+        true, true,
+        window, null,
+        0, 0, 0, 0,
+        false, false, false, false,
+        0, null
+    );
+    output.output.$canvas[0].dispatchEvent(ev);
 };

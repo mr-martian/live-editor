@@ -12,7 +12,7 @@ function PJSResourceCache(options) {
 // Execution is delayed once a getImage/getSound appears in the source code
 // and none of the resources are cached. Execution begins once all the
 // resources have loaded.
-PJSResourceCache.prototype.cacheResources = function(userCode, callback) {
+PJSResourceCache.prototype.cacheResources = function(userCode) {
     var resourceRecords = this.getResourceRecords(userCode);
 
     // Insert the images into a hidden div to cause them to load
@@ -30,7 +30,7 @@ PJSResourceCache.prototype.cacheResources = function(userCode, callback) {
 
     var promises = resourceRecords.map(this.loadResource.bind(this));
 
-    $.when.apply($, promises).then(callback);
+    return $.when.apply($, promises);
 };
 
 PJSResourceCache.prototype.getResourceRecords = function(userCode) {
@@ -54,10 +54,8 @@ PJSResourceCache.prototype.loadResource = function(resourceRecord) {
     switch (resourceRecord.type) {
         case "image":
             return this.loadImage(filename);
-            break;
         case "sound":
             return this.loadSound(filename);
-            break;
         default:
             break;
     }
@@ -85,6 +83,13 @@ PJSResourceCache.prototype.loadImage = function(filename) {
 PJSResourceCache.prototype.loadSound = function(filename) {
     var deferred = $.Deferred();
     var audio = document.createElement("audio");
+    var parts = filename.split("/");
+    
+    var group = _.findWhere(OutputSounds[0].groups, { groupName: parts[0] });
+    if (!group || group.sounds.indexOf(parts[1]) === -1) {
+        deferred.resolve();
+        return deferred;
+    }
 
     audio.preload = "auto";
     audio.oncanplaythrough = function() {
@@ -109,13 +114,10 @@ PJSResourceCache.prototype.getResource = function(filename, type) {
     switch (type) {
         case "image":
             return this.getImage(filename);
-            break;
         case "sound":
             return this.getSound(filename);
-            break;
         default:
             throw "we can't load '" + type + "' resources yet";
-            break;
     }
 };
 

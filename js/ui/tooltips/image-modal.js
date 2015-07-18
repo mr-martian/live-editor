@@ -163,12 +163,12 @@
         }
     });
 
-
     TooltipEngine.classes.imageModal = TooltipBase.extend({
         initialize: function(options) {
             this.options = options;
             this.options.files = ExtendedOutputImages;
             this.parent = options.parent;
+            this.autofill = true;
             this.render();
             this.bindToRequestTooltip();
             _.extend(this.options.record.handlers, {
@@ -273,22 +273,9 @@
         defaultFile: "\"rpg/metal-clink\"",
         initialize: function(options) {
             this.options = options;
-            this.options.files = [{
-                className: "Sound effects",
-                groups: [{
-                    groupName: "rpg",
-                    sounds: "battle-magic battle-spell battle-swing coin-jingle door-open giant-hyah giant-no giant-yah hit-clop hit-splat hit-thud hit-whack metal-chime metal-clink step-heavy water-bubble water-slosh".split(" "),
-                    cite: $._("'RPG Sound Effects' sounds by artisticdude"),
-                    citeLink: "http://opengameart.org/content/rpg-sound-pack"
-                },
-                {
-                    groupName: "retro",
-                    sounds: "boom1 boom2 coin hit1 hit2 jump1 jump2 laser1 laser2 laser3 laser4 rumble thruster-short thruster-long whistle1 whistle2".split(" "),
-                    cite: $._("'Retro Game Sounds' sounds by spongejr"),
-                    citeLink: "https://www.khanacademy.org/profile/spongejr/"
-                }]
-            }];
+            this.options.files = OutputSounds;
             this.parent = options.parent;
+            this.autofill = true;
             this.render();
             this.bindToRequestTooltip();
         },
@@ -316,7 +303,7 @@
                 closing.length === 0 &&
                 event.source &&
                 event.source.action === "insertText" &&
-                event.source.text.length === 1) {
+                event.source.text.length === 1 && this.autofill) {
                 closing = ")" + (this.isInParenthesis(
                     event.pre.slice(0, functionStart)) ? "" : ";");
                 this.insert({
